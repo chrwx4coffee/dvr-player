@@ -62,16 +62,7 @@ pip install opencv-python numpy Pillow
 
 ## Güvenlik Notu
 
-> [!WARNING]
-> `IP`, `USER` ve `PASS` değerlerini **asla** doğrudan kaynak koda yazmayın ve Git'e commit etmeyin.  
-> Bu değerleri bir `.env` dosyasında veya ortam değişkenlerinde saklayın:
->
-> ```python
-> import os
-> IP   = os.environ.get("DVR_IP", "192.168.1.XXX")
-> USER = os.environ.get("DVR_USER", "admin")
-> PASS = os.environ.get("DVR_PASS", "")
-> ```
+
 
 ## Lisans
 
