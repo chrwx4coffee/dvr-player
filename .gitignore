@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kayıt dosyaları (proje tarafından oluşturulan video kayıtları)
+*.mp4
+*.avi
+
+# Ortam değişkeni dosyaları (şifreler buraya taşınabilir)
+.env
+config.local.py
