@@ -23,6 +23,8 @@ REFRESH_MS          = 33  # ~30 FPS için (1000/30 ≈ 33ms)
 ENABLE_DENOISING    = False   
 ENABLE_SHARPENING   = False   
 ENABLE_CONTRAST     = False   
+GAMMA_VALUE         = 1.2
+SHARPEN_VALUE       = 1.0
 BUFFER_SIZE         = 1       
 FPS_TARGET          = 30      
 

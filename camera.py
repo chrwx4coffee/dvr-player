@@ -18,13 +18,16 @@ def fast_improve_image(frame):
         return frame
     
     if config.ENABLE_CONTRAST:
-        gamma = 1.2
+        gamma = config.GAMMA_VALUE
+        if gamma <= 0.1: 
+            gamma = 0.1
         inv_gamma = 1.0 / gamma
         table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
         frame = cv2.LUT(frame, table)
     
     if config.ENABLE_SHARPENING:
-        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]]) / 1.0
+        alpha = config.SHARPEN_VALUE
+        kernel = np.array([[0, -alpha, 0], [-alpha, 1 + 4*alpha, -alpha], [0, -alpha, 0]])
         frame = cv2.filter2D(frame, -1, kernel)
     
     return frame

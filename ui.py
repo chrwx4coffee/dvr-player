@@ -189,6 +189,45 @@ class App(tk.Tk):
                                     bg="#0d0d1a", fg="#555", font=("Consolas", 9))
         self.live_status.pack(side="right", padx=10)
 
+        effects_frame = tk.Frame(tab, bg="#111122", pady=4)
+        effects_frame.pack(fill="x")
+        
+        tk.Label(effects_frame, text="✨ Kalite:", bg="#111122", fg="#00d4ff", font=("Consolas", 9, "bold")).pack(side="left", padx=8)
+
+        def set_mode(mode):
+            if mode == "max_fps":
+                config.ENABLE_SHARPENING = False
+                config.ENABLE_CONTRAST = False
+            elif mode == "balanced":
+                config.ENABLE_SHARPENING = True
+                config.ENABLE_CONTRAST = True
+                self.sharpen_scale.set(0.5)
+                self.gamma_scale.set(1.2)
+            elif mode == "max_quality":
+                config.ENABLE_SHARPENING = True
+                config.ENABLE_CONTRAST = True
+                self.sharpen_scale.set(1.5)
+                self.gamma_scale.set(0.9)
+            update_sliders()
+
+        def update_sliders(*args):
+            config.SHARPEN_VALUE = float(self.sharpen_scale.get())
+            config.GAMMA_VALUE = float(self.gamma_scale.get())
+
+        ttk.Button(effects_frame, text="🚀 Maks FPS", command=lambda: set_mode("max_fps")).pack(side="left", padx=3)
+        ttk.Button(effects_frame, text="⚖️ Orta", command=lambda: set_mode("balanced")).pack(side="left", padx=3)
+        ttk.Button(effects_frame, text="🌟 Maks Kalite", command=lambda: set_mode("max_quality")).pack(side="left", padx=3)
+
+        tk.Label(effects_frame, text="Netlik:", bg="#111122", fg="#aaa").pack(side="left", padx=(15, 2))
+        self.sharpen_scale = ttk.Scale(effects_frame, from_=0.0, to=3.0, orient="horizontal", command=update_sliders)
+        self.sharpen_scale.set(config.SHARPEN_VALUE)
+        self.sharpen_scale.pack(side="left", padx=2)
+
+        tk.Label(effects_frame, text="Kontrast:", bg="#111122", fg="#aaa").pack(side="left", padx=(15, 2))
+        self.gamma_scale = ttk.Scale(effects_frame, from_=0.5, to=3.0, orient="horizontal", command=update_sliders)
+        self.gamma_scale.set(config.GAMMA_VALUE)
+        self.gamma_scale.pack(side="left", padx=2)
+
         self.canvas = tk.Canvas(tab, bg="#080814", highlightthickness=0)
         vbar = ttk.Scrollbar(tab, orient="vertical",   command=self.canvas.yview)
         hbar = ttk.Scrollbar(tab, orient="horizontal", command=self.canvas.xview)
