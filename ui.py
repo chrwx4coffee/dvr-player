@@ -5,6 +5,8 @@ from PIL import Image, ImageTk
 import threading
 import time
 import cv2
+import socket
+
 
 import config
 from camera import CamWorker, scan_all
@@ -99,6 +101,13 @@ class App(tk.Tk):
             messagebox.showinfo("Bilgi", "Bağlantı ayarları kaydedildi.")
 
         ttk.Button(conn_frame, text="💾 Kaydet", command=save_config).pack(side="left", padx=10)
+
+        def find_camera():
+            self.find_cam_btn.configure(state="disabled", text="Taranıyor...")
+            threading.Thread(target=self._scan_ports_thread, daemon=True).start()
+
+        self.find_cam_btn = ttk.Button(conn_frame, text="🔍 Kamera Bul", command=find_camera)
+        self.find_cam_btn.pack(side="left", padx=5)
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=8)
@@ -588,6 +597,36 @@ class App(tk.Tk):
                 self.last_fps_time = current_time
 
         self.after(config.REFRESH_MS, self._poll)
+
+    def _scan_ports_thread(self):
+        target_ip = self.ip_var.get()
+        ports_to_test = [80, 554, 8000, 8080, 34567, 37777]
+        open_ports = []
+        
+        config.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Kamera port taraması başlatıldı: {target_ip}")
+        for port in ports_to_test:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.5)
+                res = s.connect_ex((target_ip, port))
+                if res == 0:
+                    open_ports.append(port)
+                    config.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ PORT AÇIK: {port}")
+                s.close()
+            except Exception as e:
+                pass
+
+        config.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 🏁 Port taraması bitti. Açık portlar: {open_ports}")
+        
+        def _restore_button():
+            self.find_cam_btn.configure(state="normal", text="🔍 Kamera Bul")
+            if open_ports:
+                msg = f"Aygıt {target_ip} üzerinde açık portlar bulundu:\n\n" + ", ".join(map(str, open_ports))
+                messagebox.showinfo("Kamera Bulundu", msg)
+            else:
+                messagebox.showwarning("Bulunamadı", f"{target_ip} üzerinde hiçbir test portu açık değil.")
+                
+        self.after(100, _restore_button)
 
     def _on_close(self):
         self.stop_event.set()
