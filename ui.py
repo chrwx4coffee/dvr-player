@@ -9,7 +9,7 @@ import socket
 
 
 import config
-from camera import CamWorker, scan_all
+from camera import CamWorker, scan_all, check_camera
 
 class App(tk.Tk):
     def __init__(self):
@@ -27,8 +27,8 @@ class App(tk.Tk):
         self.selected_cam = None
         self._big_win    = None
         
-        # Sadece bir kameradan kayıt almak için global flag
-        self.active_recording_cam = None
+        # Çoklu kamera kayıt seti
+        self.active_recording_cams = set()
         
         # FPS göstergesi
         self.fps_counter = 0
@@ -90,17 +90,11 @@ class App(tk.Tk):
         self.pass_var = tk.StringVar(value=config.PASS)
         tk.Entry(conn_frame, textvariable=self.pass_var, width=10, bg="#16213e", fg="#00d4ff", show="*").pack(side="left", padx=5)
         
-        def save_config():
-            config.IP = self.ip_var.get()
-            try:
-                config.PORT = int(self.port_var.get())
-            except ValueError:
-                pass
-            config.USER = self.user_var.get()
-            config.PASS = self.pass_var.get()
+        def user_triggered_save():
+            self._auto_save_conn()
             messagebox.showinfo("Bilgi", "Bağlantı ayarları kaydedildi.")
 
-        ttk.Button(conn_frame, text="💾 Kaydet", command=save_config).pack(side="left", padx=10)
+        ttk.Button(conn_frame, text="💾 Kaydet", command=user_triggered_save).pack(side="left", padx=10)
 
         def find_camera():
             self.find_cam_btn.configure(state="disabled", text="Taranıyor...")
@@ -145,6 +139,8 @@ class App(tk.Tk):
         ttk.Button(btn, text="📋  Tümünü Göster",      command=self._filter_all).grid(row=0, column=3, padx=5)
         self.live_btn = ttk.Button(btn, text="📺  Canlı İzle →", command=self._goto_live, state="disabled")
         self.live_btn.grid(row=0, column=4, padx=5)
+        self.rescan_btn = ttk.Button(btn, text="🔄  Seçili Olanı Tekrar Tara", command=self._rescan_selected)
+        self.rescan_btn.grid(row=0, column=5, padx=5)
 
         tf = tk.Frame(tab, bg="#0d0d1a")
         tf.pack(fill="both", expand=True, padx=16, pady=4)
@@ -190,7 +186,7 @@ class App(tk.Tk):
         self.stop_record_btn = ttk.Button(ctrl, text="⏹  Kaydı Durdur", command=self._stop_recording, state="disabled")
         self.stop_record_btn.pack(side="left", padx=5)
         
-        self.perf_label = tk.Label(ctrl, text="⚡ İzole Kayıt & Multi-Threading Aktif",
+        self.perf_label = tk.Label(ctrl, text="⚡ Çoklu Kayıt & Multi-Threading Aktif",
                                    bg="#0d0d1a", fg="#2ecc71", font=("Consolas", 8, "bold"))
         self.perf_label.pack(side="left", padx=20)
         
@@ -198,44 +194,7 @@ class App(tk.Tk):
                                     bg="#0d0d1a", fg="#555", font=("Consolas", 9))
         self.live_status.pack(side="right", padx=10)
 
-        effects_frame = tk.Frame(tab, bg="#111122", pady=4)
-        effects_frame.pack(fill="x")
-        
-        tk.Label(effects_frame, text="✨ Kalite:", bg="#111122", fg="#00d4ff", font=("Consolas", 9, "bold")).pack(side="left", padx=8)
 
-        def set_mode(mode):
-            if mode == "max_fps":
-                config.ENABLE_SHARPENING = False
-                config.ENABLE_CONTRAST = False
-            elif mode == "balanced":
-                config.ENABLE_SHARPENING = True
-                config.ENABLE_CONTRAST = True
-                self.sharpen_scale.set(0.5)
-                self.gamma_scale.set(1.2)
-            elif mode == "max_quality":
-                config.ENABLE_SHARPENING = True
-                config.ENABLE_CONTRAST = True
-                self.sharpen_scale.set(1.5)
-                self.gamma_scale.set(0.9)
-            update_sliders()
-
-        def update_sliders(*args):
-            config.SHARPEN_VALUE = float(self.sharpen_scale.get())
-            config.GAMMA_VALUE = float(self.gamma_scale.get())
-
-        ttk.Button(effects_frame, text="🚀 Maks FPS", command=lambda: set_mode("max_fps")).pack(side="left", padx=3)
-        ttk.Button(effects_frame, text="⚖️ Orta", command=lambda: set_mode("balanced")).pack(side="left", padx=3)
-        ttk.Button(effects_frame, text="🌟 Maks Kalite", command=lambda: set_mode("max_quality")).pack(side="left", padx=3)
-
-        tk.Label(effects_frame, text="Netlik:", bg="#111122", fg="#aaa").pack(side="left", padx=(15, 2))
-        self.sharpen_scale = ttk.Scale(effects_frame, from_=0.0, to=3.0, orient="horizontal", command=update_sliders)
-        self.sharpen_scale.set(config.SHARPEN_VALUE)
-        self.sharpen_scale.pack(side="left", padx=2)
-
-        tk.Label(effects_frame, text="Kontrast:", bg="#111122", fg="#aaa").pack(side="left", padx=(15, 2))
-        self.gamma_scale = ttk.Scale(effects_frame, from_=0.5, to=3.0, orient="horizontal", command=update_sliders)
-        self.gamma_scale.set(config.GAMMA_VALUE)
-        self.gamma_scale.pack(side="left", padx=2)
 
         self.canvas = tk.Canvas(tab, bg="#080814", highlightthickness=0)
         vbar = ttk.Scrollbar(tab, orient="vertical",   command=self.canvas.yview)
@@ -280,9 +239,13 @@ class App(tk.Tk):
                             highlightbackground="#1e2a4a", highlightthickness=1)
             cell.grid(row=row, column=col, padx=2, pady=2)
 
-            img_lbl = tk.Label(cell, bg="#080808", cursor="hand2",
-                               width=config.CELL_W, height=config.CELL_H)
-            img_lbl.configure(width=config.CELL_W, height=config.CELL_H)
+            # Tkinter'da resimsiz Label width/height değerini karakter dizisi olarak hesapladığı için (devasa), 
+            # başlangıçta hemen siyah bir placeholder atıyoruz ki ölçüleri px olarak anlasın.
+            placeholder_img = Image.new("RGB", (config.CELL_W, config.CELL_H), (8, 8, 8))
+            placeholder_photo = ImageTk.PhotoImage(placeholder_img)
+
+            img_lbl = tk.Label(cell, bg="#080808", cursor="hand2", image=placeholder_photo)
+            img_lbl.image = placeholder_photo  # Garbage collector'dan koruma
             img_lbl.pack()
 
             title_frame = tk.Frame(cell, bg="#0d0d1a")
@@ -294,17 +257,22 @@ class App(tk.Tk):
                                   font=("Consolas", 8, "bold"), anchor="w")
             title_lbl.pack(side="left", fill="x", expand=True)
             
-            record_cam_btn = tk.Button(title_frame, text="🔴", 
-                                       bg="#0d0d1a", fg="#ff4444",
+            is_recording = False
+            btn_text = "🔴"
+            btn_color = "#ff4444"
+            
+            if key in self.workers and self.workers[key].is_recording:
+                is_recording = True
+                btn_text = "⏹"
+                btn_color = "#ffaa00"
+
+            record_cam_btn = tk.Button(title_frame, text=btn_text, 
+                                       bg="#0d0d1a", fg=btn_color,
                                        font=("Consolas", 8),
                                        command=lambda k=key: self._toggle_cam_recording(k))
             record_cam_btn.pack(side="right")
-            
-            # Eğer halihazırda başka kamera kayıt yapıyorsa, bu butonu devre dışı bırak
-            if self.active_recording_cam is not None and self.active_recording_cam != key:
-                record_cam_btn.configure(state="disabled")
                 
-            self.cells[key] = {"lbl": img_lbl, "photo": None, "recording": False, "btn": record_cam_btn}
+            self.cells[key] = {"lbl": img_lbl, "photo": None, "recording": is_recording, "btn": record_cam_btn}
 
             if key not in self.workers:
                 self.workers[key] = CamWorker(res["channel"], res["stream"])
@@ -312,18 +280,13 @@ class App(tk.Tk):
             img_lbl.bind("<Button-1>", lambda e, k=key: self._open_big(k))
 
     def _toggle_cam_recording(self, key):
-        """Tek bir kameranın kaydını başlat/durdur ve DİĞERLERİNİ İPTAL ET"""
+        """Kameranın kaydını başlat/durdur (Çoklu kaydı destekler)"""
         if key not in self.workers:
             return
         
         worker = self.workers[key]
         
         if not worker.is_recording:
-            # Başka bir kamera zaten kayıttaysa engelle
-            if self.active_recording_cam is not None and self.active_recording_cam != key:
-                messagebox.showwarning("Uyarı", "Zaten başka bir kamera kayıt yapıyor. Önce onu durdurun.")
-                return
-
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"kamera_ch{key[0]}_st{key[1]}_{timestamp}.mp4"
             
@@ -334,16 +297,9 @@ class App(tk.Tk):
             )
             
             if filepath:
-                self.active_recording_cam = key
+                self.active_recording_cams.add(key)
                 worker.start_recording(filepath)
                 
-                # Sadece Seçili Kamerayı Açık Tut, Diğer Tüm Kameraları "DURDUR/İPTAL ET"
-                for k, w in self.workers.items():
-                    if k != key:
-                        w.pause()  # RTSP bağlantısını keser, Network ve CPU'yu rahatlatır
-                        if k in self.cells:
-                            self.cells[k]["btn"].configure(state="disabled")
-
                 if key in self.cells:
                     self.cells[key]["recording"] = True
                     self.cells[key]["btn"].configure(text="⏹", fg="#ffaa00")
@@ -352,18 +308,11 @@ class App(tk.Tk):
                 if self._big_win and self.selected_cam == key and hasattr(self, 'big_record_btn'):
                     self.big_record_btn.configure(text="⏹ Kaydı Durdur", fg="#ffaa00")
 
-                self._log(f"İzole Kayıt Başlatıldı. Diğer kameralar duraklatıldı. Dosya: {filepath}")
+                self._log(f"Kayıt Başlatıldı. Dosya: {filepath}")
         else:
             worker.stop_recording()
-            self.active_recording_cam = None
+            self.active_recording_cams.discard(key)
             
-            # Kayıt bitti, DİĞER KAMERALARI GERİ BAŞLAT
-            for k, w in self.workers.items():
-                if k != key:
-                    w.resume()
-                    if k in self.cells:
-                        self.cells[k]["btn"].configure(state="normal")
-                        
             if key in self.cells:
                 self.cells[key]["recording"] = False
                 self.cells[key]["btn"].configure(text="🔴", fg="#ff4444")
@@ -372,7 +321,19 @@ class App(tk.Tk):
             if self._big_win and self.selected_cam == key and hasattr(self, 'big_record_btn'):
                 self.big_record_btn.configure(text="🔴 Kayıt Başlat", fg="#ff4444")
 
-            self._log(f"Kayıt durduruldu: Kanal {key[0]}. Diğer kameralar aktif ediliyor...")
+            self._log(f"Kayıt durduruldu: Kanal {key[0]}.")
+
+        # Kayıt başladığında/durduğunda kastırmamak için diğerlerini duraklat/uyandır
+        self._update_paused_states()
+
+    def _update_paused_states(self):
+        """Performans için: Kayıtta olan kamera varsa, kaydetmeyenleri uyut ki CPU rahatlasın."""
+        is_any_recording = len(self.active_recording_cams) > 0
+        for k, w in self.workers.items():
+            if is_any_recording and not w.is_recording:
+                w.pause()
+            else:
+                w.resume()
 
     def _start_recording(self):
         """Seçili büyük kameranın kaydını başlat"""
@@ -383,8 +344,8 @@ class App(tk.Tk):
     
     def _stop_recording(self):
         """Aktif kaydı durdur"""
-        if self.active_recording_cam:
-            self._toggle_cam_recording(self.active_recording_cam)
+        if self.selected_cam in self.active_recording_cams:
+            self._toggle_cam_recording(self.selected_cam)
 
     def _open_big(self, key):
         self.selected_cam = key
@@ -400,7 +361,7 @@ class App(tk.Tk):
         control_bar.pack(fill="x")
         
         # Eğer bu kamera kayıt yapıyorsa butonu doğru göster
-        is_rec = (self.active_recording_cam == key)
+        is_rec = (key in self.active_recording_cams)
         btn_text = "⏹ Kaydı Durdur" if is_rec else "🔴 Kayıt Başlat"
         btn_fg = "#ffaa00" if is_rec else "#ff4444"
         
@@ -409,10 +370,6 @@ class App(tk.Tk):
                                         font=("Consolas", 10, "bold"),
                                         command=lambda: self._toggle_cam_recording(key))
         
-        # Eğer BAŞKA kamera kayıt yapıyorsa bu butonu devre dışı bırak
-        if self.active_recording_cam is not None and self.active_recording_cam != key:
-            self.big_record_btn.configure(state="disabled")
-            
         self.big_record_btn.pack(side="left", padx=10, pady=5)
         
         self.big_fps_label = tk.Label(control_bar, text="FPS: --", 
@@ -469,7 +426,66 @@ class App(tk.Tk):
     def _filter_all(self):
         self._populate_tree(self.results)
 
+    def _rescan_selected(self):
+        self._auto_save_conn()
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("Uyarı", "Lütfen yeniden taramak istediğiniz bir satırı seçin.")
+            return
+            
+        item_id = selected[0]
+        values = self.tree.item(item_id, "values")
+        if not values:
+            return
+            
+        try:
+            ch, st = int(values[0]), int(values[1])
+        except ValueError:
+            return
+            
+        self.tree.item(item_id, values=(ch, st, "⏳ BEKLEYİN", "-", "Yeniden taranıyor..."))
+        self._log(f"Seçili kamera taranıyor: Kanal {ch}, Stream {st}...")
+        
+        # Sadece bu kamera için tekil bir tarama başlat (arayüzü dondurmamak için thread kullanıldı)
+        def single_scan_thread():
+            res = check_camera(ch, st)
+            icon = {"ok": "✅", "black": "⬛", "no_signal": "❌", "intermittent": "⚠️"}.get(res["status"], "❓")
+            self._log(f"{icon} [Tekrar Tarama] Kanal {ch:02d} | Stream {st} | {res['status'].upper()} | {res['note']}")
+            self.after(0, lambda: self._update_single_result(item_id, res, icon))
+            
+        threading.Thread(target=single_scan_thread, daemon=True).start()
+
+    def _update_single_result(self, item_id, res, icon):
+        brightness = str(res["brightness"]) if res["brightness"] is not None else "-"
+        try:
+            self.tree.item(item_id, values=(res["channel"], res["stream"], icon, brightness, res["note"]), tags=(res["status"],))
+        except tk.TclError:
+            pass # UI yenilendiği için eski item bulunamıyor, sorun yok.
+        
+        # Orijinal dizi güncellemesi
+        for i, r in enumerate(self.results):
+            if r["channel"] == res["channel"] and r["stream"] == res["stream"]:
+                self.results[i] = res
+                break
+        else:
+            self.results.append(res)
+            
+        self.ok_results = [r for r in self.results if r["status"] == "ok"]
+        if hasattr(self, "live_btn") and len(self.ok_results) > 0:
+            self.live_btn.configure(state="normal")
+
+    def _auto_save_conn(self):
+        """Arayüzdeki bilgileri taramadan önce otomatik olarak konfigürasyona yazar."""
+        config.IP = self.ip_var.get()
+        try:
+            config.PORT = int(self.port_var.get())
+        except ValueError:
+            pass
+        config.USER = self.user_var.get()
+        config.PASS = self.pass_var.get()
+
     def _start(self):
+        self._auto_save_conn()
         try:
             channels = self._parse_channels()
         except Exception as e:
@@ -599,6 +615,7 @@ class App(tk.Tk):
         self.after(config.REFRESH_MS, self._poll)
 
     def _scan_ports_thread(self):
+        self._auto_save_conn()
         target_ip = self.ip_var.get()
         ports_to_test = [80, 554, 8000, 8080, 34567, 37777]
         open_ports = []

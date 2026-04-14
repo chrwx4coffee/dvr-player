@@ -1,3 +1,4 @@
+import os
 import cv2
 import numpy as np
 import threading
@@ -12,25 +13,7 @@ def rtsp_url(channel, stream):
         f"&channel={channel}&stream={stream}.sdp?real_stream"
     )
 
-def fast_improve_image(frame):
-    """HIZLI görüntü iyileştirme - sadece gerekli işlemler"""
-    if frame is None:
-        return frame
-    
-    if config.ENABLE_CONTRAST:
-        gamma = config.GAMMA_VALUE
-        if gamma <= 0.1: 
-            gamma = 0.1
-        inv_gamma = 1.0 / gamma
-        table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
-        frame = cv2.LUT(frame, table)
-    
-    if config.ENABLE_SHARPENING:
-        alpha = config.SHARPEN_VALUE
-        kernel = np.array([[0, -alpha, 0], [-alpha, 1 + 4*alpha, -alpha], [0, -alpha, 0]])
-        frame = cv2.filter2D(frame, -1, kernel)
-    
-    return frame
+
 
 def is_black_frame(frame, threshold=None):
     if threshold is None:
@@ -44,41 +27,72 @@ def check_camera(channel, stream):
     result = {"channel": channel, "stream": stream, "url": url,
               "status": "unknown", "brightness": None, "note": ""}
 
-    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, config.CONNECT_TIMEOUT * 1000)
-    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, config.CONNECT_TIMEOUT * 1000)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, config.BUFFER_SIZE)
+    # FFMPEG C++ katmanında TCP + timeout ayarları — bu env değişkeni önce set edilmeli
+    timeout_us = int(config.CONNECT_TIMEOUT * 1_000_000)  # mikrosaniye
+    if getattr(config, "FORCE_TCP", True):
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;tcp|timeout;{timeout_us}"
+    else:
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"timeout;{timeout_us}"
+
+    cap_wrapper = []
+    
+    def open_cam():
+        c = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        c.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, config.CONNECT_TIMEOUT * 1000)
+        c.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, config.CONNECT_TIMEOUT * 1000)
+        c.set(cv2.CAP_PROP_BUFFERSIZE, config.BUFFER_SIZE)
+        cap_wrapper.append(c)
+        
+    t = threading.Thread(target=open_cam, daemon=True)
+    t.start()
+    t.join(timeout=max(config.CONNECT_TIMEOUT, 3.0)) # Ağı yormamak adına min 3 saniye esneklik tanır
+    
+    if t.is_alive() or not cap_wrapper:
+        result["status"] = "no_signal"
+        result["note"] = f"Ağ zaman aşımı (>{config.CONNECT_TIMEOUT} sn yanıt yok, cihaz kapalı olabilir)"
+        return result
+        
+    cap = cap_wrapper[0]
 
     if not cap.isOpened():
         result["status"] = "no_signal"
-        result["note"] = "Bağlantı kurulamadı"
+        result["note"] = "Bağlantı reddedildi veya yayın formatı geçersiz"
         cap.release()
         return result
 
     black_count, brightness_vals = 0, []
-    for _ in range(config.FRAME_CHECK_COUNT):
+    success_frame_found = False
+    max_check = max(config.FRAME_CHECK_COUNT, 15)  # En az 15 frame okumaya çalışsın (kameranın uyanması zaman alabilir)
+
+    for _ in range(max_check):
         ret, frame = cap.read()
         if not ret or frame is None:
             black_count += 1
             continue
+        
         is_black, brightness = is_black_frame(frame)
         brightness_vals.append(brightness)
-        if is_black:
-            black_count += 1
+        
+        if not is_black:
+            success_frame_found = True
+            break  # Görüntü sağlamsa hemen taramayı sonlandır ve geç (çok hızlı tarama)
+            
+        black_count += 1
+        
     cap.release()
 
     avg = round(sum(brightness_vals) / len(brightness_vals), 2) if brightness_vals else 0.0
     result["brightness"] = avg
 
-    if black_count == config.FRAME_CHECK_COUNT:
-        result["status"] = "black"
-        result["note"]   = f"Siyah ekran (ort. parlaklık: {avg})"
-    elif black_count > 0:
-        result["status"] = "intermittent"
-        result["note"]   = f"Kararsız sinyal ({black_count}/{config.FRAME_CHECK_COUNT} siyah frame)"
-    else:
+    if success_frame_found:
         result["status"] = "ok"
-        result["note"]   = f"Görüntü var (ort. parlaklık: {avg})"
+        result["note"]   = f"Görüntü net (ort. parlaklık: {avg})"
+    elif black_count >= max_check and avg > 0:
+        result["status"] = "black"
+        result["note"]   = f"Karanlık/Siyah ekran (ort. parlaklık: {avg})"
+    else:
+        result["status"] = "intermittent"
+        result["note"]   = f"Kararsız sinyal (Boş frame veya sensör uyanmadı)"
     return result
 
 def scan_all(channels, streams, log_q, result_q, stop_event):
@@ -107,7 +121,9 @@ class CamWorker:
         self._frame  = None
         self._display_frame = None  # Tkinter için hazır resize edilmiş frame
         self._lock   = threading.Lock()
+        self._writer_lock = threading.Lock()  # video_writer için ayrı kilit
         self._stop   = threading.Event()
+        self._stop_recording_flag = threading.Event()  # Kaydı güvenli durdurmak için
         self.paused  = False  # Diğer kamera kayıt yaparken durdurmak için
         
         # Kayıt değişkenleri
@@ -123,14 +139,16 @@ class CamWorker:
         threading.Thread(target=self._run, daemon=True).start()
 
     def start_recording(self, filename):
-        self.record_filename = filename
-        self.is_recording = True
+        """Kaydı başlat — sadece flag ve dosya adı set edilir, writer _run() içinde açılır."""
+        with self._writer_lock:
+            self.record_filename = filename
+            self._stop_recording_flag.clear()
+            self.is_recording = True
 
     def stop_recording(self):
+        """Kaydı durdur — sadece flag set edilir, release() _run() içinde yapılır (UI thread'inden çağrılmaz)."""
+        self._stop_recording_flag.set()
         self.is_recording = False
-        if self.video_writer is not None:
-            self.video_writer.release()
-            self.video_writer = None
 
     def pause(self):
         """Kamera akışını durdur ve ağı serbest bırak"""
@@ -151,6 +169,13 @@ class CamWorker:
             if self.paused:
                 time.sleep(0.2) # Paused ise bağlantı kurmaya çalışma, bekle
                 continue
+                
+            # FFMPEG C++ katmanında TCP + timeout ayarları (mikrosaniye cinsinden)
+            timeout_us = int(config.CONNECT_TIMEOUT * 1_000_000)
+            if getattr(config, "FORCE_TCP", True):
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;tcp|timeout;{timeout_us}"
+            else:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"timeout;{timeout_us}"
                 
             cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
             
@@ -175,9 +200,7 @@ class CamWorker:
                 if not ret:
                     break
                 
-                if config.ENABLE_DENOISING or config.ENABLE_SHARPENING or config.ENABLE_CONTRAST:
-                    frame = fast_improve_image(frame)
-                
+
                 # FPS sırrı: Ana arayüz kasmasın diye resize işlemi Thread içinde yapılıyor!
                 try:
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -189,32 +212,40 @@ class CamWorker:
                     self._frame = frame
                     self._display_frame = disp
 
-                # Kayıt işlemi
-                if self.is_recording:
-                    if self.video_writer is None:
-                        h, w = frame.shape[:2]
-                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                        self.video_writer = cv2.VideoWriter(
-                            self.record_filename, fourcc, self.fps, (w, h)
-                        )
-                    self.video_writer.write(frame)
+                # Kayıt işlemi — Tüm video_writer işlemleri _writer_lock altında yapılır
+                with self._writer_lock:
+                    # Durdurma flag'i geldiyse writer'u burada güvenle kapat
+                    if self._stop_recording_flag.is_set() and self.video_writer is not None:
+                        self.video_writer.release()
+                        self.video_writer = None
+
+                    if self.is_recording:
+                        if self.video_writer is None:
+                            h, w = frame.shape[:2]
+                            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                            self.video_writer = cv2.VideoWriter(
+                                self.record_filename, fourcc, self.fps, (w, h)
+                            )
+                        if self.video_writer is not None:
+                            self.video_writer.write(frame)
                 
-                current_time = time.time()
-                elapsed = current_time - last_frame_time
-                if elapsed < frame_time:
-                    time.sleep(frame_time - elapsed)
-                last_frame_time = current_time
+                # Yapay bekleme (sleep) kaldırıldı.
+                # cap.read() zaten doğal FPS gecikmesi kadar bloklar.
+                # Paket gecikmelerinde kare atlamamak ve alabildiğimiz en yüksek FPS'i
+                # diske yazmak için tam güç (delay olmadan) okuma yapılır.
+                pass
                 
                 self.frame_count += 1
                 if self.frame_count % self.fps == 0:
                     now = time.time()
                     self.last_time = now
 
-            # Eğer paused olduysa bağlantıyı TAMAMEN kopar ki network rahatlasın!
+            # Bağlantı koptu — cap'i bırak, varsa writer'ı da güvenle kapat
             cap.release()
-            if self.video_writer is not None:
-                self.video_writer.release()
-                self.video_writer = None
+            with self._writer_lock:
+                if self.video_writer is not None:
+                    self.video_writer.release()
+                    self.video_writer = None
 
             if not self._stop.is_set():
                 time.sleep(0.5)

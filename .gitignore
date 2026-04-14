@@ -32,3 +32,6 @@ Thumbs.db
 # Ortam değişkeni dosyaları (şifreler buraya taşınabilir)
 .env
 config.local.py
+
+# Uygulama logları (kişisel tarama sonuçları)
+logs.txt
