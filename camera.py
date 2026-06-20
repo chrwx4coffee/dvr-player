@@ -161,6 +161,7 @@ class CamWorker:
             self._display_frame = blank
 
     def resume(self):
+
         """Kamera akışını tekrar başlat"""
         self.paused = False
 
